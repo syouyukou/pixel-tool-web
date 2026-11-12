@@ -29,7 +29,13 @@
     scale: 10,
     exportGrid: false,
     background: false,
-    backgroundTolerance: 24
+    backgroundTolerance: 24,
+    renderStyle: 'standard',
+    propSimplify: 2,
+    propShades: 5,
+    propOutline: 1,
+    propLines: 35,
+    propInk: '#252c2b'
   });
 
   let state = defaults();
@@ -86,18 +92,19 @@
     const clean = defaults();
     if (!saved || typeof saved !== 'object') return clean;
     const ranges = { width: [8, 200], count: [2, 256], brightness: [-100, 100], contrast: [-100, 100],
-      saturation: [-100, 100], scale: [1, 20], redBits: [1, 8], greenBits: [1, 8], blueBits: [1, 8], backgroundTolerance: [0, 100] };
+      saturation: [-100, 100], scale: [1, 20], redBits: [1, 8], greenBits: [1, 8], blueBits: [1, 8], backgroundTolerance: [0, 100],
+      propSimplify: [0, 4], propShades: [2, 8], propOutline: [0, 2], propLines: [0, 100] };
     for (const [key, [min, max]] of Object.entries(ranges)) {
       if (typeof saved[key] === 'number' && Number.isFinite(saved[key])) clean[key] = Math.round(clamp(saved[key], min, max));
     }
     for (const key of ['rgb', 'dither', 'clean', 'outline', 'grid', 'exportGrid', 'background']) {
       if (typeof saved[key] === 'boolean') clean[key] = saved[key];
     }
-    for (const [key, allowed] of Object.entries({ bit: ['1', '2', '3', '4', '8', 'free'], mode: ['auto', 'custom'], ditherMethod: ['floyd', 'bayer'] })) {
+    for (const [key, allowed] of Object.entries({ bit: ['1', '2', '3', '4', '8', 'free'], mode: ['auto', 'custom'], renderStyle: ['standard', 'game'], ditherMethod: ['floyd', 'bayer'] })) {
       if (allowed.includes(saved[key])) clean[key] = saved[key];
     }
     const isColor = value => typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);
-    for (const key of ['outlineColor', 'gridColor']) if (isColor(saved[key])) clean[key] = saved[key].toLowerCase();
+    for (const key of ['outlineColor', 'gridColor', 'propInk']) if (isColor(saved[key])) clean[key] = saved[key].toLowerCase();
     for (const key of ['palette', 'accents']) {
       if (!Array.isArray(saved[key])) continue;
       const colors = saved[key].filter(isColor).map(value => value.toLowerCase()).slice(0, key === 'palette' ? 256 : 2);
@@ -156,7 +163,8 @@
   function builtinPresets() {
     return [
       { name: '藍白 4 色', colors: BLUE, accents: [], hint: '乾淨、輕盈的藍白調' },
-      { name: '綠色卡片', colors: GREEN, accents: ['#68b0cb'], hint: '自然綠調，留一點淺藍' }
+      { name: '綠色卡片', colors: GREEN, accents: ['#68b0cb'], hint: '自然綠調，留一點淺藍' },
+      { name: '遊戲道具', colors: ['#252c2b', '#dd6e43', '#eebd88', '#84bf8c', '#30aad2', '#edf2f2'], accents: [], hint: '50 格・平塗色塊・清楚黑框', game: true }
     ];
   }
 
@@ -164,8 +172,10 @@
     const preferred = customPresets.findIndex(p => p.name === preferredPresetName && sameSettings(p.settings, state));
     const index = preferred >= 0 ? preferred : customPresets.findIndex(p => sameSettings(p.settings, state));
     const builtins = builtinPresets();
-    const builtin = index < 0 ? builtins.find(p => state.mode === 'custom' && !state.rgb && state.bit === '2' &&
-      JSON.stringify(state.palette) === JSON.stringify(p.colors) && JSON.stringify(state.accents) === JSON.stringify(p.accents)) : null;
+    const builtin = index < 0 ? builtins.find(p => p.game
+      ? state.renderStyle === 'game'
+      : state.renderStyle === 'standard' && state.mode === 'custom' && !state.rgb && state.bit === '2' &&
+        JSON.stringify(state.palette) === JSON.stringify(p.colors) && JSON.stringify(state.accents) === JSON.stringify(p.accents)) : null;
     document.querySelectorAll('[data-preset-index]').forEach(button => {
       const selected = Number(button.dataset.presetIndex) === index;
       button.setAttribute('aria-pressed', String(selected));
@@ -226,8 +236,8 @@
   function drawPresets() {
     $('presets').replaceChildren();
     builtinPresets().forEach(p => {
-      const { card, button } = makePresetCard(p.name, [...p.colors, ...p.accents], p.hint, () => applyPreset({
-        bit: '2', count: 4, mode: 'custom', palette: [...p.colors], accents: [...p.accents], rgb: false
+      const { card, button } = makePresetCard(p.name, [...p.colors, ...p.accents], p.hint, () => applyPreset(p.game ? gamePresetSettings() : {
+        bit: '2', count: 4, mode: 'custom', palette: [...p.colors], accents: [...p.accents], rgb: false, renderStyle: 'standard'
       }, p.name, true));
       button.dataset.builtin = p.name;
       $('presets').append(card);
@@ -236,7 +246,7 @@
     customPresets.forEach((p, index) => {
       const settings = normalizeSettings(p.settings);
       const meta = settings.width + ' 格寬 · ' + (settings.rgb ? 'RGB 色彩' : settings.mode === 'auto' ? '自動減色' : '自訂色盤') +
-        (settings.background ? ' · 去背' : '');
+        (settings.renderStyle === 'game' ? ' · 遊戲道具' : '') + (settings.background ? ' · 去背' : '');
       const colors = p.previewPalette?.length ? p.previewPalette : [...settings.palette, ...settings.accents];
       const { card, button } = makePresetCard(p.name, colors, meta, () => applyPreset(p.settings, p.name));
       button.dataset.presetIndex = index;
@@ -453,7 +463,7 @@
     if (box.contains(document.activeElement) && document.activeElement.type === 'color')
       return;
 
-    const sig = JSON.stringify([colors, state.mode, state.rgb]);
+    const sig = JSON.stringify([colors, state.mode, state.rgb, state.renderStyle, state.propInk]);
 
     if (sig === paletteSignature)
       return;
@@ -469,6 +479,10 @@
 
       box.append(swatch(color, '色盤第 ' + (i + 1) + ' 色', value => {
         change(() => {
+          if (state.renderStyle === 'game' && color === state.propInk && baseIndex < 0 && accentIndex < 0) {
+            state.propInk = value;
+            return;
+          }
           if (state.rgb) {
             state.rgb = false;
             state.palette = colors.slice(0, 256);
@@ -541,13 +555,30 @@
       'blueBits',
       'ditherMethod',
       'outlineColor',
-      'gridColor'
+      'gridColor', 'propSimplify', 'propShades', 'propOutline', 'propLines', 'propInk'
     ])
       $(key).value = state[key];
 
     for (const key of ['rgb', 'dither', 'clean', 'outline', 'grid', 'exportGrid'])
       $(key).checked = state[key];
 
+    const game = state.renderStyle === 'game';
+    $('gameOptions').hidden = !game;
+    document.querySelectorAll('[data-render-style]').forEach(button => {
+      const selected = button.dataset.renderStyle === state.renderStyle;
+      button.classList.toggle('active', selected);
+      button.setAttribute('aria-pressed', String(selected));
+    });
+    for (const key of ['rgb', 'dither', 'outline', 'clean']) {
+      $(key).disabled = game;
+      $(key).checked = !game && state[key];
+    }
+    $('outlineColor').disabled = game;
+    $('gameDetailHint').hidden = !game;
+    $('propSimplifyValue').textContent = ['關閉', '輕微', '適中', '明顯', '強烈'][state.propSimplify];
+    $('propShadesValue').textContent = state.propShades + ' 階';
+    $('propOutlineValue').textContent = state.propOutline ? state.propOutline + ' 格' : '關閉';
+    $('propLinesValue').textContent = state.propLines ? state.propLines : '關閉';
     $('widthValue').textContent = state.width + ' 格';
     $('heightValue').textContent = (height() || '—') + ' 格';
     $('countValue').textContent = state.count + ' 色';
@@ -559,10 +590,10 @@
     document.querySelectorAll('[data-bit]').forEach(b => b.classList.toggle('active', b.dataset.bit === state.bit));
     document.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('active', b.dataset.mode === state.mode));
     $('freeRow').hidden = state.bit !== 'free';
-    $('rgbOptions').hidden = !state.rgb;
-    $('ditherMethod').hidden = !state.dither;
-    $('addColor').disabled = state.rgb || state.palette.length >= 256;
-    $('removeColor').disabled = state.rgb || state.palette.length <= 2;
+    $('rgbOptions').hidden = game || !state.rgb;
+    $('ditherMethod').hidden = game || !state.dither;
+    $('addColor').disabled = (!game && state.rgb) || state.palette.length >= 256;
+    $('removeColor').disabled = (!game && state.rgb) || state.palette.length <= 2;
     $('eyedropper').disabled = !source || state.accents.length >= 2;
     $('eyedropper').classList.toggle('active', picking);
     $('eyedropper').textContent = picking ? '取消取色' : '⌖ 從原圖取色';
@@ -571,8 +602,8 @@
     $('gridInfo').textContent = state.width + ' × ' + (height() || '—') + ' 格';
     $('exportSize').textContent = source ? (state.width * state.scale) + ' × ' + (height() * state.scale) + ' 像素' : '— × — 像素';
 
-    if (state.mode === 'custom' && !state.rgb)
-      activePalette = unique([...state.palette, ...state.accents]);
+    if (state.mode === 'custom' && (game || !state.rgb))
+      activePalette = unique([...state.palette, ...state.accents, ...(game && (state.propOutline || state.propLines) ? [state.propInk] : [])]);
 
     drawPalette();
     drawAccents();
@@ -757,6 +788,8 @@
   }
 
   function quantize(data, w, h) {
+    const useRGB = state.rgb && state.renderStyle !== 'game';
+    const useDither = state.dither && state.renderStyle !== 'game';
     autoBase = state.mode === 'auto' ? medianCut(data, count()) : [...state.palette];
     let colors = unique([...autoBase, ...state.accents]);
     let pal = colors.map(rgb);
@@ -785,7 +818,7 @@
       if (accentDistance <= 42 ** 2)
         return accentMatch;
 
-      if (state.rgb)
+      if (useRGB)
         return [r, g, b].map((v, c) => Math.round(clamp(v) / 255 * levels[c]) * 255 / levels[c]);
 
       for (const c of pal) {
@@ -810,8 +843,8 @@
       let g = work[i + 1];
       let b = work[i + 2];
 
-      if (state.dither && state.ditherMethod === 'bayer') {
-        const offset = (bayer[(y % 4) * 4 + x % 4] / 16 - .46875) * (state.rgb ? 48 : 64);
+      if (useDither && state.ditherMethod === 'bayer') {
+        const offset = (bayer[(y % 4) * 4 + x % 4] / 16 - .46875) * (useRGB ? 48 : 64);
         r += offset;
         g += offset;
         b += offset;
@@ -823,10 +856,10 @@
       out[i + 2] = c[2];
       out[i + 3] = data[i + 3];
 
-      if (state.rgb)
+      if (useRGB)
         used.add(hex(c));
 
-      if (state.dither && state.ditherMethod === 'floyd') {
+      if (useDither && state.ditherMethod === 'floyd') {
         const e = [r - c[0], g - c[1], b - c[2]];
 
         for (const [ox, oy, k] of [[1, 0, 7 / 16], [-1, 1, 3 / 16], [0, 1, 5 / 16], [1, 1, 1 / 16]]) {
@@ -847,7 +880,7 @@
       }
     }
 
-    activePalette = state.rgb ? unique([...used, ...state.accents]) : colors;
+    activePalette = useRGB ? unique([...used, ...state.accents]) : colors;
     return out;
   }
 
@@ -903,6 +936,152 @@
       }
     }
 
+    return out;
+  }
+
+  // ── Game props: grid-only flattening and separately controlled ink ──
+  function gamePresetSettings() {
+    return { renderStyle: 'game', width: 50, mode: 'auto', bit: 'free', count: 12,
+      accents: [], rgb: false, dither: false, clean: false, outline: false,
+      brightness: 0, contrast: 8, saturation: 14,
+      propSimplify: 2, propShades: 5, propOutline: 1, propLines: 35, propInk: '#252c2b' };
+  }
+
+  function propLuminance(data, i) {
+    return .299 * data[i] + .587 * data[i + 1] + .114 * data[i + 2];
+  }
+
+  function propColorDistance(data, i, j) {
+    return .299 * (data[i] - data[j]) ** 2 + .587 * (data[i + 1] - data[j + 1]) ** 2 + .114 * (data[i + 2] - data[j + 2]) ** 2;
+  }
+
+  function propNeighbors(cell, w, h, visit) {
+    const x = cell % w;
+    const y = Math.floor(cell / w);
+    if (x > 0) visit(cell - 1);
+    if (x + 1 < w) visit(cell + 1);
+    if (y > 0) visit(cell - w);
+    if (y + 1 < h) visit(cell + w);
+  }
+
+  // Similar neighbors blend while strong color boundaries and every alpha stay intact.
+  // Posterize luminance, rather than each RGB channel, to avoid arbitrary hue shifts.
+  function flattenPropColors(data, w, h, strength, shades, accents = []) {
+    let work = new Float32Array(data);
+    const limit = (24 + strength * 14) ** 2;
+    for (let pass = 0; pass < strength; pass++) {
+      const next = new Float32Array(work);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4;
+        if (!work[i + 3]) continue;
+        const sum = [0, 0, 0];
+        let weight = 0;
+        for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++) {
+          const xx = x + ox, yy = y + oy;
+          if (xx < 0 || xx >= w || yy < 0 || yy >= h) continue;
+          const j = (yy * w + xx) * 4;
+          if (!work[j + 3]) continue;
+          const distance = propColorDistance(work, i, j);
+          if (distance > limit) continue;
+          const spatial = ox === 0 && oy === 0 ? 4 : ox === 0 || oy === 0 ? 2 : 1;
+          const k = spatial * (1 - distance / (limit + 1)) * work[j + 3] / 255;
+          for (let c = 0; c < 3; c++) sum[c] += work[j + c] * k;
+          weight += k;
+        }
+        for (let c = 0; c < 3; c++) next[i + c] = sum[c] / weight;
+      }
+      work = next;
+    }
+    for (let i = 0; i < work.length; i += 4) {
+      if (!work[i + 3]) continue;
+      const accent = accents.find(c => (data[i] - c[0]) ** 2 + (data[i + 1] - c[1]) ** 2 + (data[i + 2] - c[2]) ** 2 <= 42 ** 2);
+      if (accent) {
+        for (let c = 0; c < 3; c++) work[i + c] = accent[c];
+        continue;
+      }
+      const luminance = propLuminance(work, i);
+      const tone = 24 + Math.round(luminance / 255 * (shades - 1)) * 231 / (shades - 1);
+      for (let c = 0; c < 3; c++) work[i + c] = clamp(work[i + c] + tone - luminance);
+    }
+    return work;
+  }
+
+  // Merge only small, low-contrast islands into larger adjacent regions.
+  // High-contrast eyes, holes and thin silhouettes are never erased by this pass.
+  function mergePropRegions(data, w, h, strength, accents = []) {
+    const out = new Uint8ClampedArray(data);
+    if (!strength) return out;
+    const labels = new Int32Array(w * h).fill(-1);
+    const regions = [];
+    for (let cell = 0; cell < labels.length; cell++) {
+      if (labels[cell] !== -1 || !data[cell * 4 + 3]) continue;
+      const id = regions.length, members = [cell], start = cell * 4;
+      labels[cell] = id;
+      for (let head = 0; head < members.length; head++) {
+        propNeighbors(members[head], w, h, neighbor => {
+          const j = neighbor * 4;
+          if (labels[neighbor] === -1 && data[j + 3] && data[j] === data[start] && data[j + 1] === data[start + 1] && data[j + 2] === data[start + 2]) {
+            labels[neighbor] = id;
+            members.push(neighbor);
+          }
+        });
+      }
+      regions.push(members);
+    }
+    const maxSize = strength * 2;
+    regions.forEach((members, id) => {
+      if (members.length > maxSize) return;
+      const i = members[0] * 4;
+      if (accents.some(c => data[i] === c[0] && data[i + 1] === c[1] && data[i + 2] === c[2])) return;
+      const candidates = new Map();
+      for (const cell of members) propNeighbors(cell, w, h, neighbor => {
+        const other = labels[neighbor];
+        if (other >= 0 && other !== id && regions[other].length > maxSize) candidates.set(other, (candidates.get(other) || 0) + 1);
+      });
+      let best = -1, bestScore = Infinity;
+      for (const [other, border] of candidates) {
+        const j = regions[other][0] * 4;
+        const distance = propColorDistance(data, i, j);
+        if (distance > (30 + strength * 10) ** 2) continue;
+        const score = distance / Math.sqrt(border);
+        if (score < bestScore) { bestScore = score; best = j; }
+      }
+      if (best >= 0) for (const cell of members) {
+        for (let c = 0; c < 3; c++) out[cell * 4 + c] = data[best + c];
+      }
+    });
+    return out;
+  }
+
+  function outlinePropPixels(data, w, h, thickness, detail, ink) {
+    const out = new Uint8ClampedArray(data);
+    const outer = new Uint8Array(w * h), inner = new Uint8Array(w * h);
+    const threshold = 130 - detail * .9;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const cell = y * w + x, i = cell * 4;
+      if (!data[i + 3]) continue;
+      for (let oy = -thickness; oy <= thickness; oy++) for (let ox = -thickness; ox <= thickness; ox++) {
+        if (!thickness || Math.abs(ox) + Math.abs(oy) > thickness) continue;
+        const xx = x + ox, yy = y + oy;
+        if (xx >= 0 && xx < w && yy >= 0 && yy < h && !data[(yy * w + xx) * 4 + 3]) outer[cell] = 1;
+      }
+      if (!detail) continue;
+      const luminance = propLuminance(data, i);
+      propNeighbors(cell, w, h, neighbor => {
+        const j = neighbor * 4;
+        if (data[j + 3] && propLuminance(data, j) - luminance > threshold && propColorDistance(data, i, j) > threshold ** 2) inner[cell] = 1;
+      });
+    }
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const cell = y * w + x;
+      let support = 0;
+      if (inner[cell]) for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++) {
+        const xx = x + ox, yy = y + oy;
+        if ((!ox && !oy) || xx < 0 || xx >= w || yy < 0 || yy >= h) continue;
+        support += inner[yy * w + xx];
+      }
+      if (outer[cell] || (inner[cell] && support >= 2)) for (let c = 0; c < 3; c++) out[cell * 4 + c] = ink[c];
+    }
     return out;
   }
 
@@ -1038,22 +1217,35 @@
   function render() {
     const w = state.width;
     const h = height();
-    const data = maskBackground(averageGrid(), w, h);
+    const game = state.renderStyle === 'game';
+    let data = maskBackground(averageGrid(), w, h);
+    if (game) data = flattenPropColors(data, w, h, state.propSimplify, state.propShades, state.accents.map(rgb));
     let pixels = quantize(data, w, h);
+    if (game) pixels = mergePropRegions(pixels, w, h, state.propSimplify, state.accents.map(rgb));
 
-    if (state.clean)
+    if (state.clean && !game)
       pixels = cleanPixels(pixels, w, h);
 
-    if (state.outline)
+    if (game) {
+      pixels = outlinePropPixels(pixels, w, h, state.propOutline, state.propLines, rgb(state.propInk));
+      if (state.propOutline || state.propLines) activePalette = unique([...activePalette, state.propInk]);
+    } else if (state.outline) {
       pixels = outlinePixels(pixels, w, h);
+    }
 
+    $('gameImageHint').hidden = !game;
+    if (game) {
+      let transparent = false;
+      for (let i = 3; i < data.length; i += 4) if (data[i] < .5) { transparent = true; break; }
+      $('gameImageHint').textContent = transparent ? '外框沿透明區域的交界繪製；細小特徵可用鉛筆補回。' : '這張圖沒有透明背景。請先去背以產生主體外框；內部線條仍會生效。';
+    }
     applyEdits(pixels);
     result = new ImageData(pixels, w, h);
     $('preview').width = w;
     $('preview').height = h;
     ctx.putImageData(result, 0, 0);
     drawPalette();
-    $('colorInfo').textContent = (state.rgb ? 'RGB 格點・' : '') + activePalette.length + ' 色' + (state.outline ? '＋描邊' : '');
+    $('colorInfo').textContent = (game ? '遊戲道具・' : state.rgb ? 'RGB 格點・' : '') + activePalette.length + ' 色' + (!game && state.outline ? '＋描邊' : '');
     fit();
     $('download').disabled = false;
     $('downloadSVG').disabled = false;
@@ -1487,7 +1679,17 @@
 
   // ── Event registration: one owner per interaction ──
   function bindSettings() {
-    for (const key of ['width', 'count', 'brightness', 'contrast', 'saturation', 'scale']) $(key).addEventListener('input', () => change(() => {
+    $('renderStyles').onclick = event => {
+      const button = event.target.closest('[data-render-style]');
+      if (!button || button.dataset.renderStyle === state.renderStyle) return;
+      change(() => {
+        state.renderStyle = button.dataset.renderStyle;
+        if (state.renderStyle === 'game') Object.assign(state, { mode: 'auto', bit: 'free', count: 12, rgb: false, dither: false });
+      });
+      status(state.renderStyle === 'game' ? '已開啟遊戲道具：自動 12 色，可調整色塊、陰影與黑框。' : '已切回一般像素，保留目前色盤設定。');
+    };
+
+    for (const key of ['width', 'count', 'brightness', 'contrast', 'saturation', 'scale', 'propSimplify', 'propShades', 'propOutline', 'propLines']) $(key).addEventListener('input', () => change(() => {
       state[key] = Number($(key).value);
 
       if (key === 'count' && state.mode === 'custom')
@@ -1497,7 +1699,7 @@
     for (const key of ['rgb', 'dither', 'clean', 'outline', 'grid', 'exportGrid'])
       $(key).addEventListener('change', () => change(() => state[key] = $(key).checked));
 
-    for (const key of ['redBits', 'greenBits', 'blueBits', 'ditherMethod', 'outlineColor', 'gridColor']) $(key).addEventListener(
+    for (const key of ['redBits', 'greenBits', 'blueBits', 'ditherMethod', 'outlineColor', 'gridColor', 'propInk']) $(key).addEventListener(
       'input',
       () => change(() => state[key] = key.endsWith('Bits') ? Number($(key).value) : $(key).value, true)
     );
@@ -1733,6 +1935,7 @@
         const groups = {
           preset: ['bit', 'count', 'mode', 'palette', 'accents', 'rgb'],
           pixel: ['width'],
+          game: ['propSimplify', 'propShades', 'propOutline', 'propLines', 'propInk'],
           color: ['bit', 'count', 'mode', 'palette', 'accents', 'rgb', 'redBits', 'greenBits', 'blueBits'],
           adjust: ['brightness', 'contrast', 'saturation'],
           detail: ['dither', 'ditherMethod', 'clean', 'outline', 'outlineColor', 'grid', 'gridColor'],
