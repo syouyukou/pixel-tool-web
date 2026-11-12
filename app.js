@@ -75,26 +75,275 @@
     $('status').classList.toggle('error', error);
   }
 
-  // ── Preset persistence ──
+  // ── Presets: backward-compatible storage, transactional edits, clear feedback ──
+  const PRESET_KEY = 'pixel-studio-presets';
+  const PRESET_LIMIT = 40;
+  let presetFormIndex = null;
+  let preferredPresetName = null;
+  let presetStorageBlocked = false;
+
+  function normalizeSettings(saved) {
+    const clean = defaults();
+    if (!saved || typeof saved !== 'object') return clean;
+    const ranges = { width: [8, 200], count: [2, 256], brightness: [-100, 100], contrast: [-100, 100],
+      saturation: [-100, 100], scale: [1, 20], redBits: [1, 8], greenBits: [1, 8], blueBits: [1, 8], backgroundTolerance: [0, 100] };
+    for (const [key, [min, max]] of Object.entries(ranges)) {
+      if (typeof saved[key] === 'number' && Number.isFinite(saved[key])) clean[key] = Math.round(clamp(saved[key], min, max));
+    }
+    for (const key of ['rgb', 'dither', 'clean', 'outline', 'grid', 'exportGrid', 'background']) {
+      if (typeof saved[key] === 'boolean') clean[key] = saved[key];
+    }
+    for (const [key, allowed] of Object.entries({ bit: ['1', '2', '3', '4', '8', 'free'], mode: ['auto', 'custom'], ditherMethod: ['floyd', 'bayer'] })) {
+      if (allowed.includes(saved[key])) clean[key] = saved[key];
+    }
+    const isColor = value => typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);
+    for (const key of ['outlineColor', 'gridColor']) if (isColor(saved[key])) clean[key] = saved[key].toLowerCase();
+    for (const key of ['palette', 'accents']) {
+      if (!Array.isArray(saved[key])) continue;
+      const colors = saved[key].filter(isColor).map(value => value.toLowerCase()).slice(0, key === 'palette' ? 256 : 2);
+      if (colors.length || key === 'accents') clean[key] = colors;
+    }
+    return clean;
+  }
+
   function readPresets() {
     try {
-      const saved = JSON.parse(localStorage.getItem('pixel-studio-presets') || '[]');
-
-      if (Array.isArray(saved))
-        customPresets = saved.filter(p => p && typeof p.name === 'string' && p.settings && Array.isArray(p.settings.palette)).slice(0, 40);
+      const saved = JSON.parse(localStorage.getItem(PRESET_KEY) || '[]');
+      if (!Array.isArray(saved)) throw new Error('Invalid preset storage');
+      customPresets = saved.filter(p => p && typeof p.name === 'string' && p.name.trim() && p.settings && typeof p.settings === 'object')
+        .map(p => ({ name: p.name.trim(), settings: normalizeSettings(p.settings),
+          ...(Array.isArray(p.previewPalette) ? { previewPalette: p.previewPalette.filter(c => typeof c === 'string' && /^#[0-9a-f]{6}$/i.test(c)).slice(0, 8) } : {}) }));
+      // Never silently overwrite malformed records with a reduced list.
+      if (customPresets.length !== saved.length) {
+        presetStorageBlocked = true;
+        status('部分預設資料無法讀取，已保留原資料並暫停儲存；請先備份瀏覽器網站資料。', true);
+      }
     } catch {
-      status('無法讀取已儲存風格；仍可正常創作。');
+      presetStorageBlocked = true;
+      status('無法讀取預設，原資料未更動。請檢查瀏覽器儲存權限；若資料損壞，請先備份。', true);
     }
   }
 
-  function persistPresets() {
-    try {
-      localStorage.setItem('pixel-studio-presets', JSON.stringify(customPresets));
-      return true;
-    } catch {
-      status('瀏覽器無法儲存風格，請檢查儲存空間或隱私設定。', true);
+  function persistPresets(next) {
+    if (presetStorageBlocked) {
+      presetError('預設資料目前無法安全儲存，請先檢查網站儲存權限或備份原資料。');
       return false;
     }
+    try {
+      localStorage.setItem(PRESET_KEY, JSON.stringify(next));
+      customPresets = next;
+      drawPresets();
+      return true;
+    } catch {
+      presetError('儲存失敗，原有預設未更動。請檢查瀏覽器儲存空間或權限。');
+      return false;
+    }
+  }
+
+  function presetError(message) {
+    $('presetFormError').textContent = message;
+    status(message, true);
+  }
+
+  function presetSnapshot(name) {
+    return { name, settings: normalizeSettings(state), previewPalette: activePalette.slice(0, 8) };
+  }
+
+  function sameSettings(a, b) {
+    return JSON.stringify(normalizeSettings(a)) === JSON.stringify(normalizeSettings(b));
+  }
+
+  function builtinPresets() {
+    return [
+      { name: '藍白 4 色', colors: BLUE, accents: [], hint: '乾淨、輕盈的藍白調' },
+      { name: '綠色卡片', colors: GREEN, accents: ['#68b0cb'], hint: '自然綠調，留一點淺藍' }
+    ];
+  }
+
+  function syncPresetSelection() {
+    const preferred = customPresets.findIndex(p => p.name === preferredPresetName && sameSettings(p.settings, state));
+    const index = preferred >= 0 ? preferred : customPresets.findIndex(p => sameSettings(p.settings, state));
+    const builtins = builtinPresets();
+    const builtin = index < 0 ? builtins.find(p => state.mode === 'custom' && !state.rgb && state.bit === '2' &&
+      JSON.stringify(state.palette) === JSON.stringify(p.colors) && JSON.stringify(state.accents) === JSON.stringify(p.accents)) : null;
+    document.querySelectorAll('[data-preset-index]').forEach(button => {
+      const selected = Number(button.dataset.presetIndex) === index;
+      button.setAttribute('aria-pressed', String(selected));
+      button.parentElement.classList.toggle('selected', selected);
+    });
+    document.querySelectorAll('[data-builtin]').forEach(button => {
+      const selected = button.dataset.builtin === builtin?.name;
+      button.setAttribute('aria-pressed', String(selected));
+      button.parentElement.classList.toggle('selected', selected);
+    });
+    $('activeStyle').textContent = index >= 0 ? customPresets[index].name : builtin?.name || '自訂調整';
+  }
+
+  function applyPreset(settings, name, partial = false) {
+    finishStroke();
+    record();
+    const accepted = change(() => {
+      if (partial) Object.assign(state, settings);
+      else state = normalizeSettings(settings);
+    });
+    if (accepted === false) {
+      status('已取消切換預設，保留目前作品與修補。');
+      return;
+    }
+    preferredPresetName = partial ? null : name;
+    picking = false;
+    sync();
+    showOriginal();
+    status('已套用「' + name + '」；可按復原回到上一步。');
+  }
+
+  function makePresetCard(name, colors, meta, run) {
+    const card = document.createElement('div');
+    card.className = 'preset-item';
+    const button = document.createElement('button');
+    button.className = 'preset-button';
+    button.setAttribute('aria-label', name);
+    const strip = document.createElement('span');
+    strip.className = 'preset-dots';
+    strip.setAttribute('aria-hidden', 'true');
+    colors.slice(0, 8).forEach(color => {
+      const dot = document.createElement('i');
+      dot.style.backgroundColor = color;
+      strip.append(dot);
+    });
+    const title = document.createElement('span');
+    title.className = 'preset-title';
+    title.textContent = name;
+    const description = document.createElement('span');
+    description.className = 'preset-meta';
+    description.textContent = meta;
+    button.append(strip, title, description);
+    button.onclick = run;
+    card.append(button);
+    return { card, button };
+  }
+
+  function drawPresets() {
+    $('presets').replaceChildren();
+    builtinPresets().forEach(p => {
+      const { card, button } = makePresetCard(p.name, [...p.colors, ...p.accents], p.hint, () => applyPreset({
+        bit: '2', count: 4, mode: 'custom', palette: [...p.colors], accents: [...p.accents], rgb: false
+      }, p.name, true));
+      button.dataset.builtin = p.name;
+      $('presets').append(card);
+    });
+    $('myPresets').replaceChildren();
+    customPresets.forEach((p, index) => {
+      const settings = normalizeSettings(p.settings);
+      const meta = settings.width + ' 格寬 · ' + (settings.rgb ? 'RGB 色彩' : settings.mode === 'auto' ? '自動減色' : '自訂色盤') +
+        (settings.background ? ' · 去背' : '');
+      const colors = p.previewPalette?.length ? p.previewPalette : [...settings.palette, ...settings.accents];
+      const { card, button } = makePresetCard(p.name, colors, meta, () => applyPreset(p.settings, p.name));
+      button.dataset.presetIndex = index;
+      const menu = document.createElement('details');
+      menu.className = 'preset-menu';
+      const summary = document.createElement('summary');
+      summary.textContent = '⋯';
+      summary.setAttribute('aria-label', '管理「' + p.name + '」');
+      const items = document.createElement('div');
+      items.className = 'preset-menu-items';
+      const action = (label, callback, danger = false) => {
+        const item = document.createElement('button');
+        item.textContent = label;
+        item.setAttribute('aria-label', label + '「' + p.name + '」');
+        if (danger) item.className = 'danger';
+        item.onclick = () => { menu.open = false; callback(); };
+        items.append(item);
+      };
+      action('重新命名', () => openPresetForm(index));
+      action('以目前設定更新', () => {
+        if (!confirm('要以目前設定更新「' + p.name + '」嗎？原設定將被取代。')) return;
+        const next = clone(customPresets);
+        next[index] = presetSnapshot(p.name);
+        if (persistPresets(next)) { status('已更新「' + p.name + '」。'); focusPreset(index); }
+      });
+      action('刪除', () => {
+        if (!confirm('確定刪除預設「' + p.name + '」？目前畫布不受影響。')) return;
+        const next = clone(customPresets);
+        next.splice(index, 1);
+        if (persistPresets(next)) {
+          closePresetForm();
+          status('已刪除「' + p.name + '」。');
+        }
+      }, true);
+      menu.append(summary, items);
+      card.append(menu);
+      $('myPresets').append(card);
+    });
+    $('presetCount').textContent = customPresets.length + ' / ' + PRESET_LIMIT;
+    $('presetEmpty').hidden = !!customPresets.length;
+    syncPresetSelection();
+  }
+
+  function focusPreset(index) {
+    document.querySelector('[data-preset-index="' + index + '"]')?.focus();
+  }
+
+  function openPresetForm(index = null) {
+    presetFormIndex = index;
+    $('presetDetails').open = true;
+    $('presetForm').hidden = false;
+    $('presetFormError').textContent = '';
+    $('presetName').value = index === null ? '' : customPresets[index].name;
+    $('presetFormTitle').textContent = index === null ? '為這組設定取個名字' : '重新命名預設';
+    $('presetSubmit').textContent = index === null ? '儲存' : '儲存名稱';
+    $('presetName').focus();
+    $('presetName').select();
+  }
+
+  function closePresetForm() {
+    $('presetForm').hidden = true;
+    $('presetFormError').textContent = '';
+    presetFormIndex = null;
+    $('savePreset').focus();
+  }
+
+  function bindPresetEditor() {
+    $('savePreset').onclick = () => openPresetForm();
+    $('cancelPreset').onclick = closePresetForm;
+    $('presetName').oninput = () => { $('presetFormError').textContent = ''; };
+    $('presetForm').addEventListener('keydown', event => {
+      if (event.code === 'Escape') { event.preventDefault(); closePresetForm(); }
+    });
+    $('presetForm').onsubmit = event => {
+      event.preventDefault();
+      const name = $('presetName').value.trim();
+      if (!name || name.length > 30) {
+        presetError('請輸入 1–30 個字的預設名稱。');
+        $('presetName').focus();
+        return;
+      }
+      const duplicate = customPresets.findIndex((p, i) => i !== presetFormIndex && p.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+      if (duplicate >= 0 && presetFormIndex !== null) {
+        presetError('已經有同名預設，請使用其他名稱。');
+        return;
+      }
+      if (duplicate >= 0 && !confirm('已有「' + customPresets[duplicate].name + '」。要以目前設定覆寫嗎？')) {
+        presetError('已取消覆寫；你可以換個名字另存。');
+        return;
+      }
+      if (presetFormIndex === null && duplicate < 0 && customPresets.length >= PRESET_LIMIT) {
+        presetError('最多可儲存 40 組；請先刪除一組，或使用同名更新。');
+        return;
+      }
+      const next = clone(customPresets);
+      let index = presetFormIndex;
+      const renaming = index !== null;
+      if (renaming) next[index].name = name;
+      else if (duplicate >= 0) { index = duplicate; next[index] = presetSnapshot(name); }
+      else { index = next.length; next.push(presetSnapshot(name)); }
+      if (!persistPresets(next)) return;
+      preferredPresetName = name;
+      syncPresetSelection();
+      closePresetForm();
+      focusPreset(index);
+      status(renaming ? '已重新命名為「' + name + '」。' : '已儲存「' + name + '」，下次開啟仍可使用。');
+    };
   }
 
   // ── Undo / redo ──
@@ -329,99 +578,7 @@
     drawAccents();
     syncEditor();
     syncBackground();
-  }
-
-  // ── Preset buttons ──
-  function drawPresets() {
-    const box = $('presets');
-    box.replaceChildren();
-
-    const list = [{
-      name: '藍白 4 色',
-      colors: BLUE,
-
-      run: () => change(() => {
-        Object.assign(state, {
-          bit: '2',
-          count: 4,
-          mode: 'custom',
-          palette: [...BLUE],
-          accents: [],
-          rgb: false
-        });
-      })
-    }, {
-      name: '綠色卡片',
-      colors: GREEN,
-
-      run: () => change(() => {
-        Object.assign(state, {
-          bit: '2',
-          count: 4,
-          mode: 'custom',
-          palette: [...GREEN],
-          accents: ['#68b0cb'],
-          rgb: false
-        });
-      })
-    }, ...customPresets.map((p, i) => ({
-      name: p.name,
-      colors: p.settings.palette,
-
-      run: () => change(() => {
-        state = Object.assign(defaults(), clone(p.settings));
-      }),
-
-      index: i
-    }))];
-
-    list.forEach(p => {
-      const wrap = document.createElement('div');
-      wrap.className = 'preset-item';
-      const b = document.createElement('button');
-      b.className = 'preset-button';
-      const dots = document.createElement('span');
-      dots.className = 'preset-dots';
-      dots.setAttribute('aria-hidden', 'true');
-
-      p.colors.slice(0, 4).forEach(c => {
-        const d = document.createElement('i');
-        d.style.background = c;
-        dots.append(d);
-      });
-
-      b.append(dots, document.createTextNode(p.name));
-
-      b.onclick = () => {
-        picking = false;
-        p.run();
-        status('已套用「' + p.name + '」。');
-      };
-
-      wrap.append(b);
-
-      if (p.index !== undefined) {
-        const del = document.createElement('button');
-        del.className = 'preset-delete';
-        del.textContent = '×';
-        del.title = '刪除「' + p.name + '」';
-        del.setAttribute('aria-label', del.title);
-
-        del.onclick = () => {
-          const old = clone(customPresets);
-          customPresets.splice(p.index, 1);
-
-          if (!persistPresets())
-            customPresets = old;
-
-          drawPresets();
-        };
-
-        wrap.append(del);
-      }
-
-      box.append(wrap);
-    });
+    syncPresetSelection();
   }
 
   // ── Conversion pipeline: average → quantize → cleanup → outline ──
@@ -1221,6 +1378,8 @@
       button.setAttribute('aria-pressed', String(button.dataset.tool === editorTool));
     });
     $('stage').classList.toggle('editing', editorTool !== 'view');
+    $('paintPalette').hidden = editorTool === 'view';
+    $('brushInfo').hidden = editorTool === 'view';
     $('brushInfo').textContent = '目前繪畫色：' + brushColor + (colors.length > 256 ? '；顯示前 256 色，其餘可用滴管選取。' : '');
     const total = Object.keys(edits).length;
     $('editCount').textContent = total ? '已修補 ' + total + ' 格' : '尚未修補';
@@ -1566,48 +1725,6 @@
     window.addEventListener('drop', e => e.preventDefault());
   }
 
-  function bindPresetEditor() {
-    $('savePreset').onclick = () => {
-      $('presetForm').hidden = false;
-      $('presetName').focus();
-    };
-
-    $('cancelPreset').onclick = () => {
-      $('presetForm').hidden = true;
-    };
-
-    $('presetForm').onsubmit = e => {
-      e.preventDefault();
-      const name = $('presetName').value.trim();
-
-      if (!name) {
-        status('請先輸入風格名稱。', true);
-        $('presetName').focus();
-        return;
-      }
-
-      if (customPresets.length >= 40) {
-        status('最多可儲存 40 個風格，請先刪除不需要的風格。', true);
-        return;
-      }
-
-      customPresets.push({
-        name,
-        settings: clone(state)
-      });
-
-      if (!persistPresets()) {
-        customPresets.pop();
-        return;
-      }
-
-      drawPresets();
-      $('presetForm').hidden = true;
-      $('presetName').value = '';
-      status('已儲存風格「' + name + '」，下次開啟仍可使用。');
-    };
-  }
-
   function bindSectionResets() {
     document.querySelectorAll('[data-reset]').forEach(b => b.onclick = () => {
       const d = defaults();
@@ -1634,6 +1751,7 @@
   }
 
   // ── Startup (same order as v1) ──
+  if (window.matchMedia('(max-width:1000px)').matches) $('presetDetails').open = false;
   bindBackground();
   bindEditor();
   bindSettings();
