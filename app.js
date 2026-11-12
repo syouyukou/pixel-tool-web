@@ -34,6 +34,7 @@
     propSimplify: 2,
     propShades: 5,
     propOutline: 1,
+    propSolid: true,
     propLines: 35,
     propInk: '#252c2b'
   });
@@ -97,9 +98,11 @@
     for (const [key, [min, max]] of Object.entries(ranges)) {
       if (typeof saved[key] === 'number' && Number.isFinite(saved[key])) clean[key] = Math.round(clamp(saved[key], min, max));
     }
-    for (const key of ['rgb', 'dither', 'clean', 'outline', 'grid', 'exportGrid', 'background']) {
+    for (const key of ['rgb', 'dither', 'clean', 'outline', 'grid', 'exportGrid', 'background', 'propSolid']) {
       if (typeof saved[key] === 'boolean') clean[key] = saved[key];
     }
+    // v1.3 game presets keep their original alpha-preserving outline.
+    if (saved.renderStyle === 'game' && typeof saved.propSolid !== 'boolean') clean.propSolid = false;
     for (const [key, allowed] of Object.entries({ bit: ['1', '2', '3', '4', '8', 'free'], mode: ['auto', 'custom'], renderStyle: ['standard', 'game'], ditherMethod: ['floyd', 'bayer'] })) {
       if (allowed.includes(saved[key])) clean[key] = saved[key];
     }
@@ -559,7 +562,7 @@
     ])
       $(key).value = state[key];
 
-    for (const key of ['rgb', 'dither', 'clean', 'outline', 'grid', 'exportGrid'])
+    for (const key of ['rgb', 'dither', 'clean', 'outline', 'grid', 'exportGrid', 'propSolid'])
       $(key).checked = state[key];
 
     const game = state.renderStyle === 'game';
@@ -578,6 +581,7 @@
     $('propSimplifyValue').textContent = ['關閉', '輕微', '適中', '明顯', '強烈'][state.propSimplify];
     $('propShadesValue').textContent = state.propShades + ' 階';
     $('propOutlineValue').textContent = state.propOutline ? state.propOutline + ' 格' : '關閉';
+    $('propSolid').disabled = !state.propOutline;
     $('propLinesValue').textContent = state.propLines ? state.propLines : '關閉';
     $('widthValue').textContent = state.width + ' 格';
     $('heightValue').textContent = (height() || '—') + ' 格';
@@ -944,7 +948,7 @@
     return { renderStyle: 'game', width: 50, mode: 'auto', bit: 'free', count: 12,
       accents: [], rgb: false, dither: false, clean: false, outline: false,
       brightness: 0, contrast: 8, saturation: 14,
-      propSimplify: 2, propShades: 5, propOutline: 1, propLines: 35, propInk: '#252c2b' };
+      propSimplify: 2, propShades: 5, propOutline: 1, propSolid: true, propLines: 35, propInk: '#252c2b' };
   }
 
   function propLuminance(data, i) {
@@ -1053,7 +1057,41 @@
     return out;
   }
 
-  function outlinePropPixels(data, w, h, thickness, detail, ink) {
+  // Only the exterior transparent region receives a solid, eight-neighbor stroke.
+  // Use a separate source mask so drawing never changes the contour being measured.
+  function solidPropOutline(painted, source, w, h, thickness, ink) {
+    const out = new Uint8ClampedArray(painted);
+    const exterior = new Uint8Array(w * h), queue = new Int32Array(w * h);
+    let tail = 0;
+    const enqueue = cell => {
+      if (!exterior[cell] && !source[cell * 4 + 3]) {
+        exterior[cell] = 1;
+        queue[tail++] = cell;
+      }
+    };
+    for (let x = 0; x < w; x++) { enqueue(x); enqueue((h - 1) * w + x); }
+    for (let y = 0; y < h; y++) { enqueue(y * w); enqueue(y * w + w - 1); }
+    for (let head = 0; head < tail; head++) propNeighbors(queue[head], w, h, enqueue);
+    // No usable exterior: an opaque photograph must not acquire a fake canvas frame.
+    if (!tail) return out;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const cell = y * w + x;
+      let stroke = false;
+      if (exterior[cell]) {
+        for (let oy = -thickness; oy <= thickness && !stroke; oy++) for (let ox = -thickness; ox <= thickness; ox++) {
+          const xx = x + ox, yy = y + oy;
+          if (xx >= 0 && xx < w && yy >= 0 && yy < h && source[(yy * w + xx) * 4 + 3]) { stroke = true; break; }
+        }
+      } else if (source[cell * 4 + 3] && (x < thickness || y < thickness || x >= w - thickness || y >= h - thickness)) {
+        // A subject clipped by the canvas gets an inward cap, without resizing edits.
+        stroke = true;
+      }
+      if (stroke) out.set([...ink, 255], cell * 4);
+    }
+    return out;
+  }
+
+  function outlinePropPixels(data, w, h, thickness, detail, ink, solid = false) {
     const out = new Uint8ClampedArray(data);
     const outer = new Uint8Array(w * h), inner = new Uint8Array(w * h);
     const threshold = 130 - detail * .9;
@@ -1061,7 +1099,7 @@
       const cell = y * w + x, i = cell * 4;
       if (!data[i + 3]) continue;
       for (let oy = -thickness; oy <= thickness; oy++) for (let ox = -thickness; ox <= thickness; ox++) {
-        if (!thickness || Math.abs(ox) + Math.abs(oy) > thickness) continue;
+        if (solid || !thickness || Math.abs(ox) + Math.abs(oy) > thickness) continue;
         const xx = x + ox, yy = y + oy;
         if (xx >= 0 && xx < w && yy >= 0 && yy < h && !data[(yy * w + xx) * 4 + 3]) outer[cell] = 1;
       }
@@ -1082,7 +1120,7 @@
       }
       if (outer[cell] || (inner[cell] && support >= 2)) for (let c = 0; c < 3; c++) out[cell * 4 + c] = ink[c];
     }
-    return out;
+    return solid && thickness ? solidPropOutline(out, data, w, h, thickness, ink) : out;
   }
 
   function outlinePixels(data, w, h) {
@@ -1227,7 +1265,7 @@
       pixels = cleanPixels(pixels, w, h);
 
     if (game) {
-      pixels = outlinePropPixels(pixels, w, h, state.propOutline, state.propLines, rgb(state.propInk));
+      pixels = outlinePropPixels(pixels, w, h, state.propOutline, state.propLines, rgb(state.propInk), state.propSolid);
       if (state.propOutline || state.propLines) activePalette = unique([...activePalette, state.propInk]);
     } else if (state.outline) {
       pixels = outlinePixels(pixels, w, h);
@@ -1237,7 +1275,7 @@
     if (game) {
       let transparent = false;
       for (let i = 3; i < data.length; i += 4) if (data[i] < .5) { transparent = true; break; }
-      $('gameImageHint').textContent = transparent ? '外框沿透明區域的交界繪製；細小特徵可用鉛筆補回。' : '這張圖沒有透明背景。請先去背以產生主體外框；內部線條仍會生效。';
+      $('gameImageHint').textContent = transparent ? (state.propSolid ? '實線外框會向透明區補上不透明輪廓；貼齊畫布的部分向內收邊。' : '柔和外框向內繪製，保留原本的半透明邊緣。') : '這張圖沒有透明背景。請先去背以產生主體外框；內部線條仍會生效。';
     }
     applyEdits(pixels);
     result = new ImageData(pixels, w, h);
@@ -1696,7 +1734,7 @@
         fitPalette();
     }, true));
 
-    for (const key of ['rgb', 'dither', 'clean', 'outline', 'grid', 'exportGrid'])
+    for (const key of ['rgb', 'dither', 'clean', 'outline', 'grid', 'exportGrid', 'propSolid'])
       $(key).addEventListener('change', () => change(() => state[key] = $(key).checked));
 
     for (const key of ['redBits', 'greenBits', 'blueBits', 'ditherMethod', 'outlineColor', 'gridColor', 'propInk']) $(key).addEventListener(
@@ -1935,7 +1973,7 @@
         const groups = {
           preset: ['bit', 'count', 'mode', 'palette', 'accents', 'rgb'],
           pixel: ['width'],
-          game: ['propSimplify', 'propShades', 'propOutline', 'propLines', 'propInk'],
+          game: ['propSimplify', 'propShades', 'propOutline', 'propSolid', 'propLines', 'propInk'],
           color: ['bit', 'count', 'mode', 'palette', 'accents', 'rgb', 'redBits', 'greenBits', 'blueBits'],
           adjust: ['brightness', 'contrast', 'saturation'],
           detail: ['dither', 'ditherMethod', 'clean', 'outline', 'outlineColor', 'grid', 'gridColor'],
